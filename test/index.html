@@ -44,6 +44,14 @@
       <button class="secondary" id="copy">結果をコピー</button>
       <pre id="summary"></pre>
     </div>
+
+    <div class="card" id="join" hidden>
+      <h2 style="margin-top:0">家族用の参加リンク</h2>
+      <p>このリンクを家族に送ってください（LINE など）。家族がリンクを開くと、Googleのファイル選択画面に「勝手にシェア」フォルダと顔データだけが表示されます。</p>
+      <p class="muted">リンクを知っていても、フォルダを共有されている人しか中身は見られません。</p>
+      <button class="secondary" id="copyJoin">参加リンクをコピー</button>
+      <pre id="joinLink"></pre>
+    </div>
   </main>
 
   <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
@@ -153,6 +161,7 @@
       }
 
       // 3. 顔データ face-data.json を読めるか
+      let faceId = null;
       try {
         const r = await drive('/files', {
           q: "name = 'face-data.json' and trashed = false",
@@ -163,6 +172,7 @@
         if (files.length === 0) {
           add('顔データを読める', false, '顔データのファイルが見えません');
         } else {
+          faceId = files[0].id;
           const data = await drive('/files/' + files[0].id, { alt: 'media' });
           const persons = (data && data.persons) || [];
           const faces = persons.reduce((n, p) => n + ((p.faces || []).length), 0);
@@ -211,10 +221,27 @@
         `端末：${navigator.userAgent}\n` +
         results.map((r) => `${r.ok ? '○' : '×'} ${r.name}：${r.detail}`).join('\n');
       $('results').hidden = false;
+      // フォルダの持ち主なら、家族用の参加リンクを作る
+      if (isOwnerAccount && folder && faceId) {
+        const url = new URL('picker.html', location.href);
+        url.searchParams.set('folder', folder.id);
+        url.searchParams.set('face', faceId);
+        $('joinLink').textContent = url.toString();
+        $('join').hidden = false;
+      }
       $('status').textContent = '試験が終わりました。';
       $('login').disabled = false;
       $('login').textContent = 'もう一度試験する';
     }
+
+    $('copyJoin').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText($('joinLink').textContent);
+        $('copyJoin').textContent = 'コピーしました';
+      } catch (_) {
+        $('copyJoin').textContent = 'コピーできませんでした（下の文字を長押しで選んでください）';
+      }
+    });
 
     $('copy').addEventListener('click', async () => {
       try {

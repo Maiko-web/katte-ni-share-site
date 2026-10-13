@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>参加の試験｜勝手にシェア</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; }
+    .card h2 { margin-top: 0; }
+    button {
+      font: inherit; font-size: 1rem; padding: 12px 20px; border-radius: 999px; border: none;
+      background: var(--accent); color: #fff; cursor: pointer; width: 100%; margin-top: 8px;
+    }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { width: 2.2em; }
+    .ok { color: #2e7d32; }
+    .ng { color: #c62828; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .picked { font-size: 0.95rem; margin: 8px 0 0; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem;
+          background: rgba(127,127,127,0.08); padding: 12px; border-radius: 8px; }
+    /* スマホでは Google のファイル選択画面を全画面に広げる（はみ出して「選択」が押せなくならないように） */
+    @media (max-width: 600px) {
+      .picker-dialog { position: fixed !important; inset: 0 !important; width: auto !important;
+                       height: auto !important; display: flex !important; flex-direction: column !important; }
+      .picker-dialog-content { flex: 1 1 auto !important; width: 100% !important; height: auto !important; }
+      .picker-dialog-content iframe { width: 100% !important; height: 100% !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="../">← 勝手にシェア</a></p>
+    <h1>参加の試験</h1>
+    <p class="lead">家族の方が、共有フォルダ「勝手にシェア」を使えるようにする手順を試します。</p>
+    <p class="muted">③の試験では、共有フォルダの中に「iPhone」フォルダを作り、「接続テスト.txt」という小さなファイルを1つ置きます。写真は扱いません。</p>
+
+    <div class="card">
+      <h2>ログイン</h2>
+      <p id="who" class="muted">まだログインしていません</p>
+      <button id="login" disabled>Googleでログイン</button>
+    </div>
+
+    <div class="card">
+      <h2>① 共有フォルダを選ぶ</h2>
+      <p class="muted">開いた画面で「勝手にシェア」フォルダを1回タップして選び、「選択」を押してください（2回タップすると中に入ってしまいます）。</p>
+      <p class="muted" id="noLink" hidden>※ 参加リンクから開いていないため、検索で探します。見つからないときは、参加リンクを送ってもらってください。</p>
+      <p class="picked" id="folderPicked">未選択</p>
+      <button id="pickFolder" disabled>フォルダを選ぶ</button>
+    </div>
+
+    <div class="card">
+      <h2>② 顔データを選ぶ</h2>
+      <p class="muted">開いた画面で「face-data.json」を選び、「選択」を押してください。</p>
+      <p class="picked" id="facePicked">未選択</p>
+      <button id="pickFace" disabled>顔データを選ぶ</button>
+    </div>
+
+    <div class="card">
+      <h2>③ 試験する</h2>
+      <p class="muted">選んだ内容はこの端末に保存されます。翌日以降は、①②を選び直さずに、ログインしてこのボタンだけを押してください。</p>
+      <button id="run" disabled>試験する</button>
+      <p class="muted" id="status"></p>
+    </div>
+
+    <div class="card" id="results" hidden>
+      <h2>結果</h2>
+      <table><tbody id="rows"></tbody></table>
+      <p class="muted">下のボタンで結果をコピーして、Claude に貼り付けてください（メールアドレスや写真の名前は含みません）。</p>
+      <button class="secondary" id="copy">結果をコピー</button>
+      <pre id="summary"></pre>
+    </div>
+  </main>
+
+  <script>
+    // 公開しても問題ない値（クライアントID、プロジェクト番号、サイト専用に制限した鍵）
+    const CLIENT_ID = '105389208635-hchoa8luaeve7hf9bec6qf8o1krm4sns.apps.googleusercontent.com';
+    const APP_ID = '105389208635';
+    const API_KEY = 'AIzaSyCeRWLNiz-JnJl0PInXSoowZS2wYh2gyFI';
+    const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+    const API = 'https://www.googleapis.com/drive/v3';
+    const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    const STORE_KEY = 'katte-ni-share-picker-test';
+
+    const $ = (id) => document.getElementById(id);
+    // 参加リンク（picker.html?folder=…&face=…）から開いた場合は、そのフォルダと顔データだけを選択画面に出す
+    const HINT = new URLSearchParams(location.search);
+    const HINT_FOLDER = HINT.get('folder');
+    const HINT_FACE = HINT.get('face');
+    $('noLink').hidden = !!(HINT_FOLDER && HINT_FACE);
+    let tokenClient = null;
+    let accessToken = null;
+    let pickerReady = false;
+    let saved = load();
+
+    function load() {
+      try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (_) { return {}; }
+    }
+    function save() {
+      // 選んだ日を記録する（翌日以降の試験で、選び直さずに使えたかを見るため）
+      saved.pickedAt = new Date().toLocaleString('ja-JP');
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); } catch (_) {}
+    }
+
+    function refresh() {
+      const loggedIn = !!accessToken;
+      $('pickFolder').disabled = !(loggedIn && pickerReady);
+      $('pickFace').disabled = !(loggedIn && pickerReady);
+      $('run').disabled = !(loggedIn && saved.folderId && saved.faceId);
+      $('folderPicked').textContent = saved.folderId ? '選択済み：' + saved.folderName : '未選択';
+      $('facePicked').textContent = saved.faceId ? '選択済み：' + saved.faceName : '未選択';
+    }
+
+    window.gisLoaded = () => {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPE,
+        callback: async (resp) => {
+          if (resp.error) {
+            $('who').textContent = 'ログインできませんでした：' + resp.error;
+            $('login').disabled = false;
+            return;
+          }
+          accessToken = resp.access_token;
+          try {
+            const about = await drive('/about', { fields: 'user(emailAddress)' });
+            $('who').textContent = 'ログイン中：' + about.user.emailAddress;
+          } catch (_) {
+            $('who').textContent = 'ログインしました';
+          }
+          $('login').textContent = 'ログインし直す';
+          $('login').disabled = false;
+          refresh();
+        },
+        error_callback: (err) => {
+          $('who').textContent = 'ログインの画面が開けませんでした：' + (err.type || err.message || err);
+          $('login').disabled = false;
+        },
+      });
+      $('login').disabled = false;
+    };
+
+    window.gapiLoaded = () => {
+      gapi.load('picker', () => { pickerReady = true; refresh(); });
+    };
+
+    $('login').addEventListener('click', () => {
+      $('login').disabled = true;
+      tokenClient.requestAccessToken();
+    });
+
+    function openPicker(views, title, onPicked) {
+      const builder = new google.picker.PickerBuilder()
+        .setAppId(APP_ID)
+        .setOAuthToken(accessToken)
+        .setDeveloperKey(API_KEY)
+        .setOrigin(window.location.protocol + '//' + window.location.host)
+        .setLocale('ja')
+        .setTitle(title)
+        .setCallback((data) => {
+          if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
+          const doc = data[google.picker.Response.DOCUMENTS][0];
+          onPicked(doc[google.picker.Document.ID], doc[google.picker.Document.NAME],
+            doc[google.picker.Document.MIME_TYPE]);
+        });
+      for (const v of views) builder.addView(v);
+      builder.build().setVisible(true);
+    }
+
+    $('pickFolder').addEventListener('click', () => {
+      const views = [];
+      if (HINT_FOLDER) {
+        views.push(new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setFileIds(HINT_FOLDER)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(true));
+      }
+      views.push(new google.picker.DocsView(google.picker.ViewId.DOCS)
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(true)
+        .setMimeTypes(FOLDER_MIME)
+        .setQuery('勝手にシェア'));
+      openPicker(views, '「勝手にシェア」フォルダを選んでください', (id, name, mime) => {
+        if (mime !== FOLDER_MIME) {
+          $('folderPicked').textContent = 'フォルダではありません。もう一度「勝手にシェア」フォルダを選んでください';
+          return;
+        }
+        saved.folderId = id;
+        saved.folderName = name;
+        save();
+        refresh();
+      });
+    });
+
+    $('pickFace').addEventListener('click', () => {
+      const views = [];
+      if (HINT_FACE) {
+        views.push(new google.picker.DocsView(google.picker.ViewId.DOCS).setFileIds(HINT_FACE));
+      }
+      views.push(new google.picker.DocsView(google.picker.ViewId.DOCS).setQuery('face-data.json'));
+      openPicker(views, '「face-data.json」を選んでください', (id, name) => {
+        if (name !== 'face-data.json') {
+          $('facePicked').textContent = '「face-data.json」ではありません。もう一度選んでください';
+          return;
+        }
+        saved.faceId = id;
+        saved.faceName = name;
+        save();
+        refresh();
+      });
+    });
+
+    async function drive(path, params = {}, init = {}) {
+      const url = new URL(path.startsWith('http') ? path : API + path);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      const res = await fetch(url, {
+        ...init,
+        headers: { Authorization: 'Bearer ' + accessToken, ...(init.headers || {}) },
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(res.status + ' ' + text.slice(0, 300));
+      return text ? JSON.parse(text) : null;
+    }
+
+    async function createFolder(name, parentId) {
+      return drive('/files', { fields: 'id' }, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
+      });
+    }
+
+    async function uploadText(name, parentId, text) {
+      const boundary = 'katte' + Date.now();
+      const meta = { name, parents: [parentId], mimeType: 'text/plain' };
+      const body =
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+        `--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${text}\r\n` +
+        `--${boundary}--`;
+      return drive(UPLOAD, {}, {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body,
+      });
+    }
+
+    $('run').addEventListener('click', async () => {
+      $('run').disabled = true;
+      $('status').textContent = '試験しています…';
+      const results = [];
+      const add = (name, ok, detail) => results.push({ name, ok, detail });
+
+      // 1. 選んだフォルダの情報
+      try {
+        const f = await drive('/files/' + saved.folderId, {
+          fields: 'name,ownedByMe,capabilities(canAddChildren,canListChildren)',
+        });
+        add('選んだフォルダを使える', true,
+          `持ち主：${f.ownedByMe ? 'このアカウント' : '別のアカウント'}、中に追加：${f.capabilities && f.capabilities.canAddChildren ? 'できる' : 'できない'}`);
+      } catch (e) {
+        add('選んだフォルダを使える', false, String(e.message || e));
+      }
+
+      // 2. フォルダの中身が見えるか（選んだフォルダの中まで許可が及ぶか）
+      //    このページが作った「iPhone」フォルダは常に見えるので数えない
+      try {
+        const r = await drive('/files', {
+          q: `'${saved.folderId}' in parents and trashed = false and name != 'iPhone'`,
+          fields: 'files(name,mimeType)',
+          pageSize: '50',
+        });
+        const files = r.files || [];
+        add('フォルダの中身が見える（このページが作ったものを除く）', files.length > 0,
+          `${files.length}件（うちフォルダ ${files.filter((x) => x.mimeType === FOLDER_MIME).length}件）`);
+      } catch (e) {
+        add('フォルダの中身が見える', false, String(e.message || e));
+      }
+
+      // 3. 顔データを読めるか
+      try {
+        const meta = await drive('/files/' + saved.faceId, { fields: 'modifiedTime' });
+        const data = await drive('/files/' + saved.faceId, { alt: 'media' });
+        const persons = (data && data.persons) || [];
+        const faces = persons.reduce((n, p) => n + ((p.faces || []).length), 0);
+        add('顔データを読める', faces > 0, `人物 ${persons.length}人・顔 ${faces}件（最終更新 ${meta.modifiedTime}）`);
+      } catch (e) {
+        add('顔データを読める', false, String(e.message || e));
+      }
+
+      // 4. 共有フォルダの中に「iPhone」フォルダを作れるか（前に作っていれば、それを使う）
+      let iphoneId = null;
+      try {
+        const r = await drive('/files', {
+          q: `name = 'iPhone' and '${saved.folderId}' in parents and mimeType = '${FOLDER_MIME}' and trashed = false`,
+          fields: 'files(id)',
+        });
+        if (r.files && r.files.length > 0) {
+          iphoneId = r.files[0].id;
+          add('「iPhone」フォルダを作れる', true, '前に作ったフォルダが見つかりました');
+        } else {
+          iphoneId = (await createFolder('iPhone', saved.folderId)).id;
+          add('「iPhone」フォルダを作れる', true, '作りました');
+        }
+      } catch (e) {
+        add('「iPhone」フォルダを作れる', false, String(e.message || e));
+      }
+
+      // 5. ファイルを置けるか
+      if (iphoneId) {
+        try {
+          await uploadText('接続テスト.txt', iphoneId,
+            '勝手にシェア（ブラウザ版）からの接続テスト\n' + new Date().toISOString() + '\n');
+          add('ファイルを置ける', true, '「iPhone」フォルダに「接続テスト.txt」を置きました');
+        } catch (e) {
+          add('ファイルを置ける', false, String(e.message || e));
+        }
+      } else {
+        add('ファイルを置ける', false, 'フォルダを作れなかったため試験していません');
+      }
+
+      // 6. Android からアップロードした写真が見えるか（フォルダを選んだことで見えるようになるか）
+      try {
+        const r = await drive('/files', {
+          q: "(mimeType contains 'image/' or mimeType contains 'video/') and trashed = false",
+          fields: 'files(appProperties)',
+          pageSize: '100',
+        });
+        const files = r.files || [];
+        const fromAndroid = files.filter((f) => f.appProperties && f.appProperties.assetId).length;
+        add('Android の写真・動画が見える', fromAndroid > 0, `${files.length}件（うち Android から ${fromAndroid}件）`);
+      } catch (e) {
+        add('Android の写真・動画が見える', false, String(e.message || e));
+      }
+
+      $('rows').innerHTML = '';
+      for (const r of results) {
+        const tr = document.createElement('tr');
+        const th = document.createElement('th');
+        th.textContent = r.ok ? '○' : '×';
+        th.className = r.ok ? 'ok' : 'ng';
+        const td = document.createElement('td');
+        td.innerHTML = '<strong></strong><br><span class="muted"></span>';
+        td.querySelector('strong').textContent = r.name;
+        td.querySelector('span').textContent = r.detail;
+        tr.append(th, td);
+        $('rows').append(tr);
+      }
+      $('summary').textContent =
+        `参加の試験（${new Date().toLocaleString('ja-JP')}）\n` +
+        `選んだ日：${saved.pickedAt || '不明'}\n` +
+        `端末：${navigator.userAgent}\n` +
+        results.map((r) => `${r.ok ? '○' : '×'} ${r.name}：${r.detail}`).join('\n');
+      $('results').hidden = false;
+      $('status').textContent = '試験が終わりました。';
+      $('run').disabled = false;
+    });
+
+    $('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText($('summary').textContent);
+        $('copy').textContent = 'コピーしました';
+      } catch (_) {
+        $('copy').textContent = 'コピーできませんでした（下の文字を長押しで選んでください）';
+      }
+    });
+
+    refresh();
+  </script>
+  <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
+  <script src="https://apis.google.com/js/api.js" async defer onload="gapiLoaded()"></script>
+</body>
+</html>
