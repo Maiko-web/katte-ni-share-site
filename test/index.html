@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>接続の試験｜勝手にシェア</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; }
+    button {
+      font: inherit; font-size: 1rem; padding: 12px 20px; border-radius: 999px; border: none;
+      background: var(--accent); color: #fff; cursor: pointer; width: 100%;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { width: 2.2em; }
+    .ok { color: #2e7d32; }
+    .ng { color: #c62828; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem;
+          background: rgba(127,127,127,0.08); padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="../">← 勝手にシェア</a></p>
+    <h1>接続の試験</h1>
+    <p class="lead">ブラウザから、Googleドライブの「勝手にシェア」フォルダが見えるかを確かめます。
+      <strong>読むだけで、ファイルを作ったり変えたりはしません。</strong></p>
+
+    <div class="card">
+      <button id="login" disabled>Googleでログインして試験する</button>
+      <p class="muted" id="status">読み込んでいます…</p>
+    </div>
+
+    <div class="card" id="results" hidden>
+      <h2 style="margin-top:0">結果</h2>
+      <p id="who"></p>
+      <table><tbody id="rows"></tbody></table>
+      <p class="muted">下のボタンで結果をコピーして、Claude に貼り付けてください（メールアドレスや写真の名前は含みません）。</p>
+      <button class="secondary" id="copy">結果をコピー</button>
+      <pre id="summary"></pre>
+    </div>
+  </main>
+
+  <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
+  <script>
+    // Google Cloud「勝手にシェア Web」のクライアントID（公開しても問題ない識別番号）
+    const CLIENT_ID = '105389208635-hchoa8luaeve7hf9bec6qf8o1krm4sns.apps.googleusercontent.com';
+    const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+    const API = 'https://www.googleapis.com/drive/v3';
+    const FOLDER_NAME = '勝手にシェア';
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+    let tokenClient;
+    let accessToken = null;
+    const $ = (id) => document.getElementById(id);
+
+    function gisLoaded() {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPE,
+        callback: (resp) => {
+          if (resp.error) {
+            $('status').textContent = 'ログインできませんでした：' + resp.error;
+            $('login').disabled = false;
+            return;
+          }
+          accessToken = resp.access_token;
+          runTests();
+        },
+        error_callback: (err) => {
+          $('status').textContent = 'ログインの画面が開けませんでした：' + (err.type || err.message || err);
+          $('login').disabled = false;
+        },
+      });
+      $('login').disabled = false;
+      $('status').textContent = 'ボタンを押すと、Googleのログイン画面が開きます。';
+    }
+
+    $('login').addEventListener('click', () => {
+      $('login').disabled = true;
+      $('status').textContent = 'ログインしています…';
+      tokenClient.requestAccessToken();
+    });
+
+    async function drive(path, params = {}) {
+      const url = new URL(API + path);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      const res = await fetch(url, { headers: { Authorization: 'Bearer ' + accessToken } });
+      const text = await res.text();
+      if (!res.ok) throw new Error(res.status + ' ' + text.slice(0, 300));
+      return text ? JSON.parse(text) : null;
+    }
+
+    function escapeQuery(s) { return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+    async function runTests() {
+      const results = [];
+      const add = (name, ok, detail) => results.push({ name, ok, detail });
+      $('status').textContent = '試験しています…';
+
+      // 0. ログインしたアカウント
+      let isOwnerAccount = null;
+      try {
+        const about = await drive('/about', { fields: 'user(emailAddress,displayName)' });
+        $('who').textContent = 'ログイン中：' + about.user.emailAddress;
+      } catch (e) {
+        $('who').textContent = 'アカウントの情報を読めませんでした';
+        add('アカウントの情報', false, String(e.message || e));
+      }
+
+      // 1. 共有フォルダ「勝手にシェア」が見えるか
+      let folder = null;
+      try {
+        const r = await drive('/files', {
+          q: `name = '${escapeQuery(FOLDER_NAME)}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
+          fields: 'files(id,name,ownedByMe,capabilities(canAddChildren))',
+          spaces: 'drive',
+          includeItemsFromAllDrives: 'true',
+          supportsAllDrives: 'true',
+        });
+        const files = r.files || [];
+        folder = files[0] || null;
+        if (folder) isOwnerAccount = folder.ownedByMe === true;
+        add('共有フォルダ「勝手にシェア」が見える', files.length > 0,
+          files.length === 0 ? '見えません'
+            : `${files.length}件見つかりました（持ち主：${folder.ownedByMe ? 'このアカウント' : '別のアカウント'}、中に追加：${folder.capabilities && folder.capabilities.canAddChildren ? 'できる' : 'できない'}）`);
+      } catch (e) {
+        add('共有フォルダ「勝手にシェア」が見える', false, String(e.message || e));
+      }
+
+      // 2. フォルダの中身（月ごとのフォルダなど）が見えるか
+      if (folder) {
+        try {
+          const r = await drive('/files', {
+            q: `'${folder.id}' in parents and trashed = false`,
+            fields: 'files(name,mimeType)',
+            pageSize: '50',
+            spaces: 'drive',
+          });
+          const files = r.files || [];
+          const folders = files.filter((f) => f.mimeType === FOLDER_MIME).length;
+          add('フォルダの中身が見える', files.length > 0, `${files.length}件（うちフォルダ ${folders}件）`);
+        } catch (e) {
+          add('フォルダの中身が見える', false, String(e.message || e));
+        }
+      } else {
+        add('フォルダの中身が見える', false, 'フォルダが見えないため試験していません');
+      }
+
+      // 3. 顔データ face-data.json を読めるか
+      try {
+        const r = await drive('/files', {
+          q: "name = 'face-data.json' and trashed = false",
+          fields: 'files(id,modifiedTime)',
+          spaces: 'drive',
+        });
+        const files = r.files || [];
+        if (files.length === 0) {
+          add('顔データを読める', false, '顔データのファイルが見えません');
+        } else {
+          const data = await drive('/files/' + files[0].id, { alt: 'media' });
+          const persons = (data && data.persons) || [];
+          const faces = persons.reduce((n, p) => n + ((p.faces || []).length), 0);
+          add('顔データを読める', faces > 0, `人物 ${persons.length}人・顔 ${faces}件（最終更新 ${files[0].modifiedTime}）`);
+        }
+      } catch (e) {
+        add('顔データを読める', false, String(e.message || e));
+      }
+
+      // 4. Android でアップロードした写真・動画が見えるか
+      try {
+        const r = await drive('/files', {
+          q: "(mimeType contains 'image/' or mimeType contains 'video/') and trashed = false",
+          fields: 'files(id,mimeType,thumbnailLink,appProperties)',
+          pageSize: '100',
+          spaces: 'drive',
+        });
+        const files = r.files || [];
+        const fromAndroid = files.filter((f) => f.appProperties && f.appProperties.assetId).length;
+        const videos = files.filter((f) => f.mimeType.startsWith('video/')).length;
+        const thumbs = files.filter((f) => f.thumbnailLink).length;
+        add('アップロードした写真・動画が見える', fromAndroid > 0,
+          `${files.length}件（うち Android から ${fromAndroid}件・動画 ${videos}件・小さい画像あり ${thumbs}件。最大100件まで数えています）`);
+      } catch (e) {
+        add('アップロードした写真・動画が見える', false, String(e.message || e));
+      }
+
+      // 表示
+      $('rows').innerHTML = '';
+      for (const r of results) {
+        const tr = document.createElement('tr');
+        const th = document.createElement('th');
+        th.textContent = r.ok ? '○' : '×';
+        th.className = r.ok ? 'ok' : 'ng';
+        const td = document.createElement('td');
+        td.innerHTML = '<strong></strong><br><span class="muted"></span>';
+        td.querySelector('strong').textContent = r.name;
+        td.querySelector('span').textContent = r.detail;
+        tr.append(th, td);
+        $('rows').append(tr);
+      }
+      const ownerText = isOwnerAccount === null ? '不明' : (isOwnerAccount ? 'はい' : 'いいえ');
+      $('summary').textContent =
+        `接続の試験（${new Date().toLocaleString('ja-JP')}）\n` +
+        `フォルダの持ち主のアカウントか：${ownerText}\n` +
+        `端末：${navigator.userAgent}\n` +
+        results.map((r) => `${r.ok ? '○' : '×'} ${r.name}：${r.detail}`).join('\n');
+      $('results').hidden = false;
+      $('status').textContent = '試験が終わりました。';
+      $('login').disabled = false;
+      $('login').textContent = 'もう一度試験する';
+    }
+
+    $('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText($('summary').textContent);
+        $('copy').textContent = 'コピーしました';
+      } catch (_) {
+        $('copy').textContent = 'コピーできませんでした（下の文字を長押しで選んでください）';
+      }
+    });
+  </script>
+</body>
+</html>
