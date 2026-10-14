@@ -10,8 +10,8 @@ const MODEL_CACHE = 'katte-ni-share-models-v1';
 
 /** 写真は長い辺をこの大きさに縮めてから扱う（Android と同じ）。 */
 const MAX_SIDE = 1280;
-/** 顔を見つけるときの入力の大きさ（正方形）。 */
-const DET_SIZE = 640;
+/** 顔を見つけるときの入力の大きさ（正方形）。全身写真など小さい顔も目・鼻・口の位置を正しく取れるよう 960 にする。 */
+const DET_SIZE = 960;
 const DET_SCORE = 0.6;
 const DET_NMS = 0.3;
 const SIZE = 112;
