@@ -340,6 +340,7 @@ async function showHome() {
   try {
     const meta = await drive('/files/' + state.config.faceId, { fields: 'modifiedTime' });
     const data = await drive('/files/' + state.config.faceId, { alt: 'media' });
+    state.faceData = data;
     const persons = (data && data.persons) || [];
     state.faces = persons.reduce((n, p) => n + ((p.faces || []).length), 0);
     const name = persons[0] ? persons[0].name : '';
@@ -368,6 +369,134 @@ $('copyJoin').addEventListener('click', async () => {
     $('copyJoin').textContent = 'コピーしました';
   } catch (_) {
     $('copyJoin').textContent = 'コピーできませんでした（下の文字を長押しで選んでください）';
+  }
+});
+
+// ---------- 判定の試験（W2。アップロードはしない） ----------
+
+const test = { results: [], view: 'match' };
+
+$('openTest').addEventListener('click', () => {
+  $('testCard').hidden = false;
+  $('testCard').scrollIntoView({ behavior: 'smooth' });
+});
+
+$('pickTest').addEventListener('click', () => $('testFiles').click());
+
+function thresholds() {
+  const d = state.faceData || {};
+  return { upload: d.uploadThreshold ?? 0.55, review: d.reviewThreshold ?? 0.3 };
+}
+
+function categoryOf(score) {
+  const t = thresholds();
+  if (score === null || score < t.review) return 'other';
+  if (score < t.upload) return 'review';
+  return 'match';
+}
+
+$('testFiles').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (files.length === 0) return;
+  const person = (state.faceData && state.faceData.persons || [])[0];
+  if (!person || !person.faces || person.faces.length === 0) {
+    $('testStatus').textContent = '顔データがありません';
+    return;
+  }
+  $('pickTest').disabled = true;
+  test.results = [];
+  try {
+    const face = await import('./face.js');
+    await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
+    const started = performance.now();
+    for (let i = 0; i < files.length; i++) {
+      $('testStatus').textContent = `判定しています… ${i + 1} / ${files.length}`;
+      try {
+        const r = await face.judgePhoto(files[i], person.faces);
+        test.results.push({ ...r, file: files[i] });
+      } catch (err) {
+        test.results.push({ score: null, faceCount: 0, thumbnail: '', file: files[i], error: String(err.message || err) });
+      }
+      renderTest();
+    }
+    const sec = (performance.now() - started) / 1000 / files.length;
+    $('testStatus').textContent = `${files.length}枚を判定しました（1枚あたり ${sec.toFixed(1)}秒）`;
+    renderTest(sec);
+  } catch (err) {
+    $('testStatus').textContent = 'エラーが発生しました：' + (err.message || err);
+  } finally {
+    $('pickTest').disabled = false;
+  }
+});
+
+function label(r) {
+  if (r.error) return '読めない';
+  if (r.score === null) return '顔なし';
+  return String(Math.round(r.score * 100));
+}
+
+function renderTest(secPerPhoto) {
+  const names = { match: (state.faceData.persons[0] || {}).name || '娘', review: '要確認', other: 'ちがう' };
+  const counts = { match: 0, review: 0, other: 0 };
+  for (const r of test.results) counts[categoryOf(r.score)]++;
+
+  $('testTabs').innerHTML = '';
+  for (const key of ['match', 'review', 'other']) {
+    const b = document.createElement('button');
+    b.textContent = `${names[key]} ${counts[key]}枚`;
+    b.className = test.view === key ? 'active' : '';
+    b.addEventListener('click', () => { test.view = key; renderTest(secPerPhoto); });
+    $('testTabs').append(b);
+  }
+
+  $('testGrid').innerHTML = '';
+  const shown = test.results
+    .filter((r) => categoryOf(r.score) === test.view)
+    .sort((p, q) => (q.score ?? -1) - (p.score ?? -1));
+  for (const r of shown) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    if (r.thumbnail) {
+      const img = document.createElement('img');
+      img.src = r.thumbnail;
+      tile.append(img);
+    }
+    const span = document.createElement('span');
+    span.textContent = label(r);
+    tile.append(span);
+    tile.addEventListener('click', () => showViewer(r));
+    $('testGrid').append(tile);
+  }
+
+  const t = thresholds();
+  $('testSummary').textContent =
+    `判定の試験（ブラウザ版、${new Date().toLocaleString('ja-JP')}）\n` +
+    `端末：${navigator.userAgent}\n` +
+    `境目：${names.match} ${Math.round(t.upload * 100)}以上／要確認 ${Math.round(t.review * 100)}以上\n` +
+    `${names.match} ${counts.match}枚・要確認 ${counts.review}枚・ちがう ${counts.other}枚` +
+    (secPerPhoto ? `（1枚あたり ${secPerPhoto.toFixed(1)}秒）` : '') + '\n' +
+    '点数：' + test.results.map(label).join(', ');
+  $('testResult').hidden = false;
+}
+
+function showViewer(r) {
+  const url = URL.createObjectURL(r.file);
+  $('viewerImg').src = url;
+  $('viewerImg').onload = () => URL.revokeObjectURL(url);
+  $('viewerText').textContent =
+    `${r.file.name}\n見つかった顔：${r.faceCount}つ・似ている度 ${label(r)}` + (r.error ? `\n${r.error}` : '');
+  $('viewer').hidden = false;
+}
+
+$('viewerClose').addEventListener('click', () => { $('viewer').hidden = true; $('viewerImg').src = ''; });
+
+$('copyTest').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('testSummary').textContent);
+    $('copyTest').textContent = 'コピーしました';
+  } catch (_) {
+    $('copyTest').textContent = 'コピーできませんでした（下の文字を長押しで選んでください）';
   }
 });
 

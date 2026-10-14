@@ -50,6 +50,27 @@
         <p id="faceInfo"></p>
         <button id="share" disabled>写真を共有する（準備中）</button>
         <button class="secondary" id="openFolder">共有フォルダを開く（みんなの写真）</button>
+        <button class="secondary" id="openTest">判定の試験（アップロードしない）</button>
+      </div>
+
+      <div class="card" id="testCard" hidden>
+        <h2>判定の試験</h2>
+        <p class="muted">写真を選ぶと、iPhone の中で顔を判定して分けます。アップロードはしません。初回だけ判定の部品（約40MB）を読み込むので、Wi-Fi のときに試してください。</p>
+        <input type="file" id="testFiles" accept="image/*" multiple hidden>
+        <button id="pickTest">写真を選んで判定する</button>
+        <p class="muted" id="testStatus"></p>
+        <div id="testResult" hidden>
+          <div class="tabs" id="testTabs"></div>
+          <div class="grid" id="testGrid"></div>
+          <button class="secondary" id="copyTest">結果をコピー</button>
+          <pre id="testSummary"></pre>
+        </div>
+      </div>
+
+      <div class="viewer" id="viewer" hidden>
+        <img id="viewerImg" alt="">
+        <p id="viewerText"></p>
+        <button class="secondary" id="viewerClose">閉じる</button>
       </div>
 
       <div class="card" id="joinCard" hidden>
