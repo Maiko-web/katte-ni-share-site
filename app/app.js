@@ -407,7 +407,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js');
+    const face = await import('./face.js?v=w2');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
