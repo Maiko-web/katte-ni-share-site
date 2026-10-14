@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#ffb977">
   <title>勝手にシェア</title>
   <link rel="stylesheet" href="../style.css">
-  <link rel="stylesheet" href="app.css?v=w2">
+  <link rel="stylesheet" href="app.css?v=w3">
 </head>
 <body>
   <main>
@@ -48,9 +48,24 @@
       <div class="card">
         <p class="muted" id="who"></p>
         <p id="faceInfo"></p>
-        <button id="share" disabled>写真を共有する（準備中）</button>
+        <p id="lastInfo" class="muted"></p>
+        <input type="file" id="shareFiles" accept="image/*" multiple hidden>
+        <button id="share">写真を共有する</button>
+        <p class="muted">最近の写真を、多めに選んで大丈夫です（共有済みの写真は自動で飛ばします）。</p>
         <button class="secondary" id="openFolder">共有フォルダを開く（みんなの写真）</button>
         <button class="secondary" id="openTest">判定の試験（アップロードしない）</button>
+      </div>
+
+      <div class="card" id="shareCard" hidden>
+        <h2>共有</h2>
+        <p id="shareStatus"></p>
+        <progress id="shareProgress" max="1" value="0"></progress>
+        <p class="muted" id="shareNote">処理が終わるまで、画面を開いたままにしてください。</p>
+        <div id="reviewBox" hidden>
+          <h3>要確認</h3>
+          <p class="muted">判定が微妙だった写真です。「娘です」を押すと共有します。</p>
+          <div id="reviewList"></div>
+        </div>
       </div>
 
       <div class="card" id="testCard" hidden>
@@ -90,7 +105,7 @@
     <p class="muted" id="message"></p>
   </main>
 
-  <script src="app.js?v=w2"></script>
+  <script src="app.js?v=w3"></script>
   <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
   <script src="https://apis.google.com/js/api.js" async defer onload="gapiLoaded()"></script>
 </body>

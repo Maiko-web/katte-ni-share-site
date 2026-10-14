@@ -117,6 +117,13 @@ window.gisLoaded = () => {
         return;
       }
       state.token = resp.access_token;
+      state.tokenAt = Date.now();
+      if (state.refreshing) {
+        // ログインの延長（ホーム画面から）。設定の読み直しは不要
+        state.refreshing = false;
+        $('message').textContent = 'ログインを延長しました。もう一度ボタンを押してください。';
+        return;
+      }
       afterLogin().catch((e) => {
         $('startStatus').textContent = 'エラーが発生しました：' + (e.message || e);
         $('start').disabled = false;
@@ -350,12 +357,277 @@ async function showHome() {
     $('faceInfo').textContent = '顔データを読めませんでした：' + (e.message || e);
   }
 
+  $('lastInfo').textContent = '前回の記録を読み込んでいます…';
+  loadRecords().then(showLastInfo).catch(() => { $('lastInfo').textContent = ''; });
+
   if (state.owner) {
     const url = new URL(location.pathname, location.origin);
     url.searchParams.set('folder', state.config.folderId);
     url.searchParams.set('face', state.config.faceId);
     $('joinLink').textContent = url.toString();
     $('joinCard').hidden = false;
+  }
+}
+
+// ---------- 写真を共有する（W3） ----------
+
+// 処理済みの記録。利用者のドライブに、このアプリが作ったファイルとして保存する。
+const RECORDS_FILE = 'katte-ni-share-web-records.json';
+const UPLOAD_FOLDER = 'iPhone';
+/** ログインの有効期限（約1時間）より前に、延長を求める。 */
+const TOKEN_MAX_AGE = 45 * 60 * 1000;
+
+const share = { records: null, recordsFileId: null, folders: {}, running: false };
+
+/** このアプリが作った JSON ファイルを名前で探して読む（無ければ null）。 */
+async function readAppJson(name) {
+  const r = await drive('/files', { q: `name = '${name}' and trashed = false`, fields: 'files(id)', spaces: 'drive' });
+  const file = (r.files || [])[0];
+  if (!file) return null;
+  return { fileId: file.id, data: await drive('/files/' + file.id, { alt: 'media' }) };
+}
+
+/** このアプリの JSON ファイルを保存する（fileId があれば上書き、無ければ作る）。fileId を返す。 */
+async function writeAppJson(name, data, fileId) {
+  const body = JSON.stringify(data);
+  if (fileId) {
+    await drive(`https://www.googleapis.com/upload/drive/v3/files/${fileId}`, { uploadType: 'media' },
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+    return fileId;
+  }
+  const boundary = 'katte' + Date.now();
+  const multipart =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify({ name, mimeType: 'application/json' }) + '\r\n' +
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${body}\r\n--${boundary}--`;
+  const r = await drive('https://www.googleapis.com/upload/drive/v3/files', { uploadType: 'multipart', fields: 'id' },
+    { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
+  return r.id;
+}
+
+async function loadRecords() {
+  if (share.records) return;
+  const found = await readAppJson(RECORDS_FILE);
+  share.records = (found && found.data) || { version: 1, records: {}, lastTaken: null };
+  share.recordsFileId = found ? found.fileId : null;
+}
+
+async function saveRecords() {
+  share.recordsFileId = await writeAppJson(RECORDS_FILE, share.records, share.recordsFileId);
+}
+
+function showLastInfo() {
+  const last = share.records && share.records.lastTaken;
+  $('lastInfo').textContent = last
+    ? `前回は ${new Date(last).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })} 撮影の写真まで処理済みです。`
+    : 'まだ共有していません。';
+}
+
+/**
+ * 同じ写真を見分ける印。撮影日時（秒以下まで）と大きさを使う
+ * （iPhone は選ぶたびにファイル名や形式が変わることがあるため）。読めなければ中身の指紋。
+ */
+async function photoKey(file, exif) {
+  if (exif) return `exif:${exif.date}.${exif.subsec}:${exif.width}x${exif.height}`;
+  const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return 'sha:' + Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** フォルダを探し、無ければ作る（このアプリが作ったフォルダだけが見える）。 */
+async function findOrCreateFolder(name, parentId) {
+  const key = parentId + '/' + name;
+  if (share.folders[key]) return share.folders[key];
+  const r = await drive('/files', {
+    q: `name = '${name}' and '${parentId}' in parents and mimeType = '${FOLDER_MIME}' and trashed = false`,
+    fields: 'files(id)',
+  });
+  let id = (r.files || [])[0] && r.files[0].id;
+  if (!id) {
+    id = (await drive('/files', { fields: 'id' }, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
+    })).id;
+  }
+  share.folders[key] = id;
+  return id;
+}
+
+/** 写真を元の画質のまま、共有フォルダの「iPhone/年-月」にアップロードする。 */
+async function uploadPhoto(file, key, takenAt, score) {
+  // 前に途中で止まったときなどに、すでに送ってあれば送らない
+  const existing = await drive('/files', {
+    q: `appProperties has { key='webKey' and value='${key.replace(/'/g, "\\'")}' } and trashed = false`,
+    fields: 'files(id)',
+  });
+  if (existing.files && existing.files.length) return existing.files[0].id;
+
+  const taken = takenAt || new Date(file.lastModified);
+  const month = `${taken.getFullYear()}-${String(taken.getMonth() + 1).padStart(2, '0')}`;
+  const iphoneId = await findOrCreateFolder(UPLOAD_FOLDER, state.config.folderId);
+  const monthId = await findOrCreateFolder(month, iphoneId);
+  const meta = {
+    name: file.name || 'IMG.jpg',
+    parents: [monthId],
+    createdTime: taken.toISOString(),
+    modifiedTime: taken.toISOString(),
+    appProperties: { webKey: key, score: score === null ? '' : score.toFixed(3) },
+  };
+  const boundary = 'katte' + Date.now();
+  const body = new Blob([
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`,
+    `--${boundary}\r\nContent-Type: ${file.type || 'image/jpeg'}\r\n\r\n`,
+    file,
+    `\r\n--${boundary}--`,
+  ]);
+  const r = await drive('https://www.googleapis.com/upload/drive/v3/files', { uploadType: 'multipart', fields: 'id' },
+    { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
+  return r.id;
+}
+
+$('share').addEventListener('click', () => {
+  if (share.running) return;
+  if (Date.now() - (state.tokenAt || 0) > TOKEN_MAX_AGE) {
+    // 写真を選ぶ画面はボタンを押したときにしか開けないため、延長のあとでもう一度押してもらう
+    state.refreshing = true;
+    $('message').textContent = 'ログインを延長しています…';
+    tokenClient.requestAccessToken({ prompt: '' });
+    return;
+  }
+  $('shareFiles').click();
+});
+
+$('shareFiles').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (files.length === 0) return;
+  const person = (state.faceData && state.faceData.persons || [])[0];
+  if (!person || !person.faces || !person.faces.length) {
+    $('message').textContent = '顔データがありません';
+    return;
+  }
+  share.running = true;
+  $('share').disabled = true;
+  $('shareCard').hidden = false;
+  $('reviewBox').hidden = true;
+  $('reviewList').innerHTML = '';
+  $('shareCard').scrollIntoView({ behavior: 'smooth' });
+  let wakeLock = null;
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+
+  const counts = { uploaded: 0, review: 0, other: 0, skipped: 0, errors: 0 };
+  const reviews = [];
+  const errors = [];
+  try {
+    $('shareStatus').textContent = '前回までの記録を読み込んでいます…';
+    await loadRecords();
+    const face = await import('./face.js?v=w3');
+    const exifMod = await import('./exif.js?v=w3');
+    await face.loadFaceModels((s) => { if (s) $('shareStatus').textContent = s; });
+
+    $('shareProgress').max = files.length;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      $('shareStatus').textContent = `処理しています… ${i + 1} / ${files.length}`;
+      $('shareProgress').value = i;
+      try {
+        const exif = await exifMod.readExif(file).catch(() => null);
+        const key = await photoKey(file, exif);
+        const takenAt = exif ? exifMod.exifDate(exif.date) : null;
+        const known = share.records.records[key];
+        if (known && known.s !== 'r') { counts.skipped++; continue; }
+
+        const r = await face.judgePhoto(file, person.faces);
+        const category = categoryOf(r.score);
+        const record = { s: 's', score: r.score, t: takenAt ? takenAt.toISOString() : null };
+        if (category === 'match') {
+          record.s = 'u';
+          record.f = await uploadPhoto(file, key, takenAt, r.score);
+          counts.uploaded++;
+        } else if (category === 'review') {
+          record.s = 'r';
+          counts.review++;
+          reviews.push({ file, key, takenAt, score: r.score, thumbnail: r.thumbnail });
+        } else {
+          counts.other++;
+        }
+        share.records.records[key] = record;
+        if (takenAt && (!share.records.lastTaken || takenAt > new Date(share.records.lastTaken))) {
+          share.records.lastTaken = takenAt.toISOString();
+        }
+        // 途中で止まっても記録が残るよう、こまめに保存する
+        if ((i + 1) % 5 === 0) await saveRecords();
+      } catch (err) {
+        counts.errors++;
+        if (errors.length < 3) errors.push(String(err.message || err));
+        if (err.status === 401) {
+          errors.push('ログインの有効期限が切れました。もう一度「写真を共有する」を押してください');
+          break;
+        }
+      }
+    }
+    $('shareProgress').value = files.length;
+    await saveRecords();
+    $('shareStatus').textContent =
+      `完了：共有 ${counts.uploaded}枚・要確認 ${counts.review}枚・ちがう ${counts.other}枚` +
+      `・共有済みで飛ばした ${counts.skipped}枚` + (counts.errors ? `・失敗 ${counts.errors}枚` : '');
+    $('shareNote').textContent = errors.length ? '失敗の理由：\n' + errors.join('\n') : '';
+    showLastInfo();
+    showReviews(reviews);
+  } catch (err) {
+    $('shareStatus').textContent = 'エラーで止まりました：' + (err.message || err);
+  } finally {
+    if (wakeLock) wakeLock.release().catch(() => {});
+    share.running = false;
+    $('share').disabled = false;
+  }
+});
+
+function showReviews(reviews) {
+  $('reviewList').innerHTML = '';
+  $('reviewBox').hidden = reviews.length === 0;
+  for (const item of reviews) {
+    const row = document.createElement('div');
+    row.className = 'review-item';
+    const img = document.createElement('img');
+    img.src = item.thumbnail;
+    img.addEventListener('click', () => showViewer({ file: item.file, faceCount: '-', score: item.score }));
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const text = document.createElement('div');
+    text.className = 'muted';
+    text.textContent = `似ている度 ${item.score === null ? '-' : Math.round(item.score * 100)}`;
+    const yes = document.createElement('button');
+    yes.textContent = (state.faceData.persons[0] || {}).name + 'です';
+    const no = document.createElement('button');
+    no.className = 'secondary';
+    no.textContent = '違います';
+    const decide = async (isMatch) => {
+      yes.disabled = no.disabled = true;
+      try {
+        const record = share.records.records[item.key] || {};
+        if (isMatch) {
+          record.f = await uploadPhoto(item.file, item.key, item.takenAt, item.score);
+          record.s = 'u';
+          text.textContent = '共有しました';
+        } else {
+          record.s = 's';
+          text.textContent = '共有しません';
+        }
+        share.records.records[item.key] = record;
+        await saveRecords();
+        yes.remove();
+        no.remove();
+      } catch (err) {
+        text.textContent = 'できませんでした：' + (err.message || err);
+        yes.disabled = no.disabled = false;
+      }
+    };
+    yes.addEventListener('click', () => decide(true));
+    no.addEventListener('click', () => decide(false));
+    actions.append(text, yes, no);
+    row.append(img, actions);
+    $('reviewList').append(row);
   }
 }
 
@@ -407,7 +679,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js?v=w2');
+    const face = await import('./face.js?v=w3');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
