@@ -1,0 +1,26 @@
+.card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; }
+.card h2 { margin-top: 0; }
+.step { margin-top: 16px; }
+.step h3 { font-size: 1rem; margin: 0 0 4px; }
+button {
+  font: inherit; font-size: 1rem; padding: 12px 20px; border-radius: 999px; border: none;
+  background: var(--accent); color: #fff; cursor: pointer; width: 100%; margin-top: 8px;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+.muted { color: var(--muted); font-size: 0.9rem; }
+.picked { font-size: 0.95rem; margin: 8px 0 0; }
+pre { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem;
+      background: rgba(127,127,127,0.08); padding: 12px; border-radius: 8px; }
+main { padding-bottom: calc(32px + env(safe-area-inset-bottom)); }
+
+/* スマホでは Google のファイル選択画面を全画面に広げる（入れ物が二重なので外側を固定し、
+   中の画面を 100% にする。高さが潰れて一覧が見えなくなるのを防ぐ） */
+@media (max-width: 600px) {
+  .picker-dialog { position: fixed !important; inset: 0 !important;
+                   width: auto !important; height: auto !important; }
+  .picker-dialog > .picker-dialog-content { position: absolute !important; inset: 0 !important;
+                                            width: auto !important; height: auto !important; }
+  .picker-dialog-content.picker-frame, iframe.picker-dialog-frame {
+    width: 100% !important; height: 100% !important; }
+}
