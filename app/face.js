@@ -10,8 +10,10 @@ const MODEL_CACHE = 'katte-ni-share-models-v1';
 
 /** 写真は長い辺をこの大きさに縮めてから扱う（Android と同じ）。 */
 const MAX_SIDE = 1280;
-/** 顔を見つけるときの入力の大きさ（正方形）。全身写真など小さい顔も目・鼻・口の位置を正しく取れるよう 960 にする。 */
-const DET_SIZE = 960;
+/** 顔を見つけるときの入力の大きさ（正方形。YuNet は 640 で固定）。 */
+const DET_SIZE = 640;
+/** これより小さい顔（縮小後の写真の上の大きさ）は、周りを拡大して探し直す。 */
+const SMALL_FACE = 120;
 const DET_SCORE = 0.6;
 const DET_NMS = 0.3;
 const SIZE = 112;
@@ -107,18 +109,24 @@ async function decode(file) {
   return canvas;
 }
 
-/** YuNet で顔と目・鼻・口の位置を見つける（座標は src キャンバス上）。 */
-async function detectFaces(src) {
-  const scale = DET_SIZE / Math.max(src.width, src.height);
-  const w = Math.round(src.width * scale);
-  const h = Math.round(src.height * scale);
+/**
+ * YuNet で顔と目・鼻・口の位置を見つける（座標は src キャンバス上）。
+ * region（{x, y, size}）を指定すると、その正方形の範囲を拡大して探す。
+ */
+async function detectFaces(src, region = null) {
+  const rx = region ? region.x : 0;
+  const ry = region ? region.y : 0;
+  const rsize = region ? region.size : Math.max(src.width, src.height);
+  const scale = DET_SIZE / rsize;
   const canvas = document.createElement('canvas');
   canvas.width = DET_SIZE;
   canvas.height = DET_SIZE;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, DET_SIZE, DET_SIZE);
-  ctx.drawImage(src, 0, 0, w, h);
+  ctx.setTransform(scale, 0, 0, scale, -rx * scale, -ry * scale);
+  ctx.drawImage(src, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   const px = ctx.getImageData(0, 0, DET_SIZE, DET_SIZE).data;
 
   // YuNet の入力は BGR、画素値は 0〜255 のまま（NCHW）
@@ -155,13 +163,13 @@ async function detectFaces(src) {
         const points = [];
         for (let n = 0; n < 5; n++) {
           points.push([
-            ((kps[idx * 10 + 2 * n] + c) * stride) / scale,
-            ((kps[idx * 10 + 2 * n + 1] + r) * stride) / scale,
+            ((kps[idx * 10 + 2 * n] + c) * stride) / scale + rx,
+            ((kps[idx * 10 + 2 * n + 1] + r) * stride) / scale + ry,
           ]);
         }
         faces.push({
           score,
-          box: [(cx - bw / 2) / scale, (cy - bh / 2) / scale, bw / scale, bh / scale],
+          box: [(cx - bw / 2) / scale + rx, (cy - bh / 2) / scale + ry, bw / scale, bh / scale],
           points,
         });
       }
@@ -169,6 +177,33 @@ async function detectFaces(src) {
   }
   for (const t of Object.values(out)) t.dispose && t.dispose();
   return nms(faces);
+}
+
+/**
+ * 小さい顔（全身写真など）は、その周りを拡大して探し直し、目・鼻・口の位置を正確にする。
+ * YuNet の入力は 640 で固定のため、写真全体だと小さい顔の位置がずれやすい。
+ */
+async function refineSmallFaces(src, faces) {
+  const result = [];
+  for (const face of faces) {
+    const [x, y, w, h] = face.box;
+    const side = Math.max(w, h);
+    if (side >= SMALL_FACE) {
+      result.push(face);
+      continue;
+    }
+    // 顔の大きさの約5倍の正方形を、640 に拡大して探す
+    const size = Math.max(side * 5, 160);
+    const region = { x: x + w / 2 - size / 2, y: y + h / 2 - size / 2, size };
+    const found = await detectFaces(src, region);
+    let best = null;
+    for (const f of found) {
+      const overlap = iou(f, face);
+      if (overlap > 0.3 && (!best || overlap > best.overlap)) best = { f, overlap };
+    }
+    result.push(best ? best.f : face);
+  }
+  return result;
 }
 
 function iou(a, b) {
@@ -265,7 +300,7 @@ export function scoreAgainst(faces, embedding) {
  */
 export async function judgePhoto(file, registered) {
   const canvas = await decode(file);
-  const detected = await detectFaces(canvas);
+  const detected = await refineSmallFaces(canvas, await detectFaces(canvas));
   let best = null;
   for (const face of detected) {
     const emb = await embed(align(canvas, face.points));

@@ -521,8 +521,8 @@ $('shareFiles').addEventListener('change', async (e) => {
   try {
     $('shareStatus').textContent = '前回までの記録を読み込んでいます…';
     await loadRecords();
-    const face = await import('./face.js?v=w4');
-    const exifMod = await import('./exif.js?v=w4');
+    const face = await import('./face.js?v=w5');
+    const exifMod = await import('./exif.js?v=w5');
     await face.loadFaceModels((s) => { if (s) $('shareStatus').textContent = s; });
 
     $('shareProgress').max = files.length;
@@ -679,7 +679,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js?v=w4');
+    const face = await import('./face.js?v=w5');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
