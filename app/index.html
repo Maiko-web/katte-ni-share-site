@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#ffb977">
   <title>勝手にシェア</title>
   <link rel="stylesheet" href="../style.css">
-  <link rel="stylesheet" href="app.css?v=w5">
+  <link rel="stylesheet" href="app.css?v=w6">
 </head>
 <body>
   <main>
@@ -49,8 +49,8 @@
         <p class="muted" id="who"></p>
         <p id="faceInfo"></p>
         <p id="lastInfo" class="muted"></p>
-        <input type="file" id="shareFiles" accept="image/*" multiple hidden>
-        <button id="share">写真を共有する</button>
+        <input type="file" id="shareFiles" accept="image/*,video/*" multiple hidden>
+        <button id="share">写真・動画を共有する</button>
         <p class="muted">最近の写真を、多めに選んで大丈夫です（共有済みの写真は自動で飛ばします）。</p>
         <button class="secondary" id="openFolder">共有フォルダを開く（みんなの写真）</button>
         <button class="secondary" id="openTest">判定の試験（アップロードしない）</button>
@@ -84,6 +84,7 @@
 
       <div class="viewer" id="viewer" hidden>
         <img id="viewerImg" alt="">
+        <video id="viewerVideo" controls playsinline hidden></video>
         <p id="viewerText"></p>
         <button class="secondary" id="viewerClose">閉じる</button>
       </div>
@@ -105,7 +106,7 @@
     <p class="muted" id="message"></p>
   </main>
 
-  <script src="app.js?v=w5"></script>
+  <script src="app.js?v=w6"></script>
   <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
   <script src="https://apis.google.com/js/api.js" async defer onload="gapiLoaded()"></script>
 </body>

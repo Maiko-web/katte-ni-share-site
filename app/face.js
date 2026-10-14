@@ -300,6 +300,15 @@ export function scoreAgainst(faces, embedding) {
  */
 export async function judgePhoto(file, registered) {
   const canvas = await decode(file);
+  const { score, faceCount } = await judgeCanvas(canvas, registered);
+  const thumbnail = makeThumbnail(canvas);
+  canvas.width = 0;
+  canvas.height = 0;
+  return { score, faceCount, thumbnail };
+}
+
+/** キャンバスの中の顔を判定する（いちばん似ている顔の点数と、顔の数）。 */
+async function judgeCanvas(canvas, registered) {
   const detected = await refineSmallFaces(canvas, await detectFaces(canvas));
   let best = null;
   for (const face of detected) {
@@ -307,14 +316,102 @@ export async function judgePhoto(file, registered) {
     const s = scoreAgainst(registered, emb);
     if (s !== null && (best === null || s > best)) best = s;
   }
-  // 一覧に表示する小さな見本画像（メモリを節約するため、元の写真は持たない）
+  return { score: best, faceCount: detected.length };
+}
+
+/** 一覧に表示する小さな見本画像（メモリを節約するため、元の写真は持たない）。 */
+function makeThumbnail(canvas) {
   const t = document.createElement('canvas');
   const ts = 240 / Math.max(canvas.width, canvas.height);
   t.width = Math.round(canvas.width * ts);
   t.height = Math.round(canvas.height * ts);
   t.getContext('2d').drawImage(canvas, 0, 0, t.width, t.height);
-  const thumbnail = t.toDataURL('image/jpeg', 0.7);
-  canvas.width = 0;
-  canvas.height = 0;
-  return { score: best, faceCount: detected.length, thumbnail };
+  return t.toDataURL('image/jpeg', 0.7);
+}
+
+/** 動画の長さと大きさだけを読む（同じ動画を見分けるため）。 */
+export async function videoInfo(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'metadata';
+  video.src = url;
+  try {
+    await waitFor(video, 'loadedmetadata', 20000);
+    return { duration: video.duration, width: video.videoWidth, height: video.videoHeight };
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** これより長い動画は、娘が写っていても自動では共有せず「要確認」にする（Android と同じ）。 */
+export const MAX_AUTO_VIDEO_SEC = 180;
+
+function waitFor(el, event, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error('動画の読み込みに時間がかかりすぎました')); }, timeoutMs);
+    const onOk = () => { cleanup(); resolve(); };
+    const onErr = () => { cleanup(); reject(new Error('動画を読み込めませんでした')); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      el.removeEventListener(event, onOk);
+      el.removeEventListener('error', onErr);
+    };
+    el.addEventListener(event, onOk);
+    el.addEventListener('error', onErr);
+  });
+}
+
+/**
+ * 動画を判定する。動画全体から均等に最大30枚（2秒に1枚まで）の画像を取り出して判定し、
+ * はっきり写っている場面が見つかれば、そこで終える（Android と同じ）。
+ * 返り値：{ score, duration, width, height, tooLong, thumbnail, framesChecked, framesWithFace }
+ */
+export async function judgeVideo(file, registered, uploadThreshold, { stopEarly = true } = {}) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = url;
+  try {
+    await waitFor(video, 'loadeddata', 30000);
+    const duration = video.duration;
+    const tooLong = duration > MAX_AUTO_VIDEO_SEC;
+    const count = Math.max(1, Math.min(30, Math.ceil(duration / 2)));
+    const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const ctx = canvas.getContext('2d');
+
+    let best = null;
+    let checked = 0;
+    let withFace = 0;
+    let thumbnail = '';
+    for (let i = 0; i < count; i++) {
+      video.currentTime = Math.min(duration * (i + 0.5) / count, Math.max(duration - 0.05, 0));
+      await waitFor(video, 'seeked', 15000);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (!thumbnail) thumbnail = makeThumbnail(canvas);
+      const r = await judgeCanvas(canvas, registered);
+      checked++;
+      if (r.faceCount > 0) withFace++;
+      if (r.score !== null && (best === null || r.score > best)) best = r.score;
+      if (stopEarly && !tooLong && best !== null && best >= uploadThreshold) break;
+    }
+    const result = {
+      score: best, duration, width: video.videoWidth, height: video.videoHeight,
+      tooLong, thumbnail, framesChecked: checked, framesWithFace: withFace,
+    };
+    canvas.width = 0;
+    canvas.height = 0;
+    return result;
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+  }
 }

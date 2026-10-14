@@ -433,6 +433,10 @@ async function photoKey(file, exif) {
   return 'sha:' + Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function isVideoFile(file) {
+  return (file.type || '').startsWith('video/') || /\.(mov|mp4|m4v)$/i.test(file.name || '');
+}
+
 /** フォルダを探し、無ければ作る（このアプリが作ったフォルダだけが見える）。 */
 async function findOrCreateFolder(name, parentId) {
   const key = parentId + '/' + name;
@@ -473,16 +477,72 @@ async function uploadPhoto(file, key, takenAt, score) {
     modifiedTime: taken.toISOString(),
     appProperties: { webKey: key, score: score === null ? '' : score.toFixed(3) },
   };
-  const boundary = 'katte' + Date.now();
-  const body = new Blob([
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`,
-    `--${boundary}\r\nContent-Type: ${file.type || 'image/jpeg'}\r\n\r\n`,
-    file,
-    `\r\n--${boundary}--`,
-  ]);
-  const r = await drive('https://www.googleapis.com/upload/drive/v3/files', { uploadType: 'multipart', fields: 'id' },
-    { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
-  return r.id;
+  const type = file.type || (file.name && /\.(mov|mp4|m4v)$/i.test(file.name) ? 'video/quicktime' : 'image/jpeg');
+
+  // 5MB 以下は1回で送る。それより大きいもの（動画や大きな写真）は、分けて送る方式を使う
+  if (file.size <= 5 * 1024 * 1024) {
+    const boundary = 'katte' + Date.now();
+    const body = new Blob([
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`,
+      `--${boundary}\r\nContent-Type: ${type}\r\n\r\n`,
+      file,
+      `\r\n--${boundary}--`,
+    ]);
+    const r = await drive('https://www.googleapis.com/upload/drive/v3/files', { uploadType: 'multipart', fields: 'id' },
+      { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
+    return r.id;
+  }
+  return uploadResumable(file, type, meta);
+}
+
+/** 大きなファイルを、8MB ずつ分けて送る（途中で通信が切れても、その分から送り直す）。 */
+async function uploadResumable(file, type, meta) {
+  const start = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + state.token,
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': type,
+      'X-Upload-Content-Length': String(file.size),
+    },
+    body: JSON.stringify(meta),
+  });
+  if (!start.ok) throw new Error('アップロードを始められませんでした（' + start.status + '）');
+  const session = start.headers.get('Location');
+  if (!session) throw new Error('アップロード先を受け取れませんでした');
+
+  const CHUNK = 8 * 1024 * 1024; // 256KB の倍数にする決まり
+  let offset = 0;
+  let retries = 0;
+  while (offset < file.size) {
+    const end = Math.min(offset + CHUNK, file.size);
+    let res;
+    try {
+      res = await fetch(session, {
+        method: 'PUT',
+        headers: { 'Content-Range': `bytes ${offset}-${end - 1}/${file.size}` },
+        body: file.slice(offset, end),
+      });
+    } catch (err) {
+      if (++retries > 3) throw err;
+      await new Promise((r) => setTimeout(r, 2000 * retries));
+      // どこまで届いたかを聞いて、続きから送る
+      const check = await fetch(session, { method: 'PUT', headers: { 'Content-Range': `bytes */${file.size}` } });
+      const range = check.headers.get('Range');
+      offset = range ? Number(range.split('-')[1]) + 1 : 0;
+      continue;
+    }
+    if (res.status === 308) {
+      const range = res.headers.get('Range');
+      offset = range ? Number(range.split('-')[1]) + 1 : end;
+      retries = 0;
+      if (share.onUploadProgress) share.onUploadProgress(offset, file.size);
+      continue;
+    }
+    if (!res.ok) throw new Error('アップロードできませんでした（' + res.status + '）');
+    return (await res.json()).id;
+  }
+  throw new Error('アップロードが完了しませんでした');
 }
 
 $('share').addEventListener('click', () => {
@@ -521,8 +581,8 @@ $('shareFiles').addEventListener('change', async (e) => {
   try {
     $('shareStatus').textContent = '前回までの記録を読み込んでいます…';
     await loadRecords();
-    const face = await import('./face.js?v=w5');
-    const exifMod = await import('./exif.js?v=w5');
+    const face = await import('./face.js?v=w6');
+    const exifMod = await import('./exif.js?v=w6');
     await face.loadFaceModels((s) => { if (s) $('shareStatus').textContent = s; });
 
     $('shareProgress').max = files.length;
@@ -531,23 +591,52 @@ $('shareFiles').addEventListener('change', async (e) => {
       $('shareStatus').textContent = `処理しています… ${i + 1} / ${files.length}`;
       $('shareProgress').value = i;
       try {
-        const exif = await exifMod.readExif(file).catch(() => null);
-        const key = await photoKey(file, exif);
-        const takenAt = exif ? exifMod.exifDate(exif.date) : null;
+        const isVideo = isVideoFile(file);
+        let key;
+        let takenAt = null;
+        if (isVideo) {
+          // 動画は、長さ（1000分の1秒まで）と大きさで見分ける
+          const info = await face.videoInfo(file);
+          key = `video:${Math.round(info.duration * 1000)}:${info.width}x${info.height}`;
+          takenAt = file.lastModified ? new Date(file.lastModified) : null;
+        } else {
+          const exif = await exifMod.readExif(file).catch(() => null);
+          key = await photoKey(file, exif);
+          takenAt = exif ? exifMod.exifDate(exif.date) : null;
+        }
         const known = share.records.records[key];
         if (known && known.s !== 'r') { counts.skipped++; continue; }
 
-        const r = await face.judgePhoto(file, person.faces);
-        const category = categoryOf(r.score);
+        let r;
+        let category;
+        if (isVideo) {
+          $('shareStatus').textContent = `動画を判定しています… ${i + 1} / ${files.length}`;
+          r = await face.judgeVideo(file, person.faces, thresholds().upload);
+          category = categoryOf(r.score);
+          // 3分より長い動画は、娘が写っていても自動では共有しない
+          if (r.tooLong && category === 'match') category = 'review';
+        } else {
+          r = await face.judgePhoto(file, person.faces);
+          category = categoryOf(r.score);
+        }
         const record = { s: 's', score: r.score, t: takenAt ? takenAt.toISOString() : null };
+        if (isVideo) record.v = true;
         if (category === 'match') {
           record.s = 'u';
+          if (isVideo) {
+            share.onUploadProgress = (done, total) => {
+              $('shareStatus').textContent =
+                `動画をアップロードしています… ${Math.round(done / 1e6)} / ${Math.round(total / 1e6)} MB（${i + 1} / ${files.length}）`;
+            };
+          }
           record.f = await uploadPhoto(file, key, takenAt, r.score);
+          share.onUploadProgress = null;
           counts.uploaded++;
         } else if (category === 'review') {
           record.s = 'r';
           counts.review++;
-          reviews.push({ file, key, takenAt, score: r.score, thumbnail: r.thumbnail });
+          reviews.push({ file, key, takenAt, score: r.score, thumbnail: r.thumbnail, isVideo,
+            note: isVideo && r.tooLong ? '3分より長い動画です' : '' });
         } else {
           counts.other++;
         }
@@ -561,7 +650,7 @@ $('shareFiles').addEventListener('change', async (e) => {
         counts.errors++;
         if (errors.length < 3) errors.push(String(err.message || err));
         if (err.status === 401) {
-          errors.push('ログインの有効期限が切れました。もう一度「写真を共有する」を押してください');
+          errors.push('ログインの有効期限が切れました。もう一度「写真・動画を共有する」を押してください');
           break;
         }
       }
@@ -596,7 +685,7 @@ function showReviews(reviews) {
     actions.className = 'actions';
     const text = document.createElement('div');
     text.className = 'muted';
-    text.textContent = `似ている度 ${item.score === null ? '-' : Math.round(item.score * 100)}`;
+    text.textContent = `${item.isVideo ? '動画・' : ''}似ている度 ${item.score === null ? '-' : Math.round(item.score * 100)}${item.note ? '・' + item.note : ''}`;
     const yes = document.createElement('button');
     yes.textContent = (state.faceData.persons[0] || {}).name + 'です';
     const no = document.createElement('button');
@@ -679,7 +768,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js?v=w5');
+    const face = await import('./face.js?v=w6');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
@@ -752,16 +841,28 @@ function renderTest(secPerPhoto) {
   $('testResult').hidden = false;
 }
 
+let viewerUrl = null;
+
 function showViewer(r) {
-  const url = URL.createObjectURL(r.file);
-  $('viewerImg').src = url;
-  $('viewerImg').onload = () => URL.revokeObjectURL(url);
+  viewerUrl = URL.createObjectURL(r.file);
+  const video = isVideoFile(r.file);
+  $('viewerImg').hidden = video;
+  $('viewerVideo').hidden = !video;
+  if (video) $('viewerVideo').src = viewerUrl;
+  else $('viewerImg').src = viewerUrl;
   $('viewerText').textContent =
     `${r.file.name}\n見つかった顔：${r.faceCount}つ・似ている度 ${label(r)}` + (r.error ? `\n${r.error}` : '');
   $('viewer').hidden = false;
 }
 
-$('viewerClose').addEventListener('click', () => { $('viewer').hidden = true; $('viewerImg').src = ''; });
+$('viewerClose').addEventListener('click', () => {
+  $('viewer').hidden = true;
+  $('viewerImg').removeAttribute('src');
+  $('viewerVideo').pause();
+  $('viewerVideo').removeAttribute('src');
+  if (viewerUrl) URL.revokeObjectURL(viewerUrl);
+  viewerUrl = null;
+});
 
 $('copyTest').addEventListener('click', async () => {
   try {
