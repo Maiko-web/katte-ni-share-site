@@ -24,12 +24,16 @@
     .picked { font-size: 0.95rem; margin: 8px 0 0; }
     pre { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem;
           background: rgba(127,127,127,0.08); padding: 12px; border-radius: 8px; }
-    /* スマホでは Google のファイル選択画面を全画面に広げる（はみ出して「選択」が押せなくならないように） */
+    /* スマホでは Google のファイル選択画面を全画面に広げる（はみ出して「選択」が押せなくならないように）。
+       入れ物（.picker-dialog-content）が二重になっているため、外側を全画面に固定し、
+       中の画面（iframe）を 100% にする（高さが潰れて一覧が見えなくなるのを防ぐ） */
     @media (max-width: 600px) {
-      .picker-dialog { position: fixed !important; inset: 0 !important; width: auto !important;
-                       height: auto !important; display: flex !important; flex-direction: column !important; }
-      .picker-dialog-content { flex: 1 1 auto !important; width: 100% !important; height: auto !important; }
-      .picker-dialog-content iframe { width: 100% !important; height: 100% !important; }
+      .picker-dialog { position: fixed !important; inset: 0 !important;
+                       width: auto !important; height: auto !important; }
+      .picker-dialog > .picker-dialog-content { position: absolute !important; inset: 0 !important;
+                                                width: auto !important; height: auto !important; }
+      .picker-dialog-content.picker-frame, iframe.picker-dialog-frame {
+        width: 100% !important; height: 100% !important; }
     }
   </style>
 </head>
@@ -52,6 +56,7 @@
       <p class="muted" id="noLink" hidden>※ 参加リンクから開いていないため、検索で探します。見つからないときは、参加リンクを送ってもらってください。</p>
       <p class="picked" id="folderPicked">未選択</p>
       <button id="pickFolder" disabled>フォルダを選ぶ</button>
+      <button class="secondary" id="pickFolderAlt" disabled>一覧が空のとき：別の表示で探す</button>
     </div>
 
     <div class="card">
@@ -59,6 +64,13 @@
       <p class="muted">開いた画面で「face-data.json」を選び、「選択」を押してください。</p>
       <p class="picked" id="facePicked">未選択</p>
       <button id="pickFace" disabled>顔データを選ぶ</button>
+      <button class="secondary" id="pickFaceAlt" disabled>一覧が空のとき：名前で探す</button>
+    </div>
+
+    <div class="card">
+      <h2>うまくいかないとき</h2>
+      <p class="muted" id="pickerLog">（選択画面で何が起きたかを、ここに表示します）</p>
+      <p class="muted">選択画面の一覧が、どちらのボタンでも空のときは、iPhone の「設定」→「アプリ」→「Safari」→「サイト越えトラッキングを防ぐ」を一時的にオフにして、もう一度試してください（終わったら必ずオンに戻してください）。</p>
     </div>
 
     <div class="card">
@@ -110,8 +122,9 @@
 
     function refresh() {
       const loggedIn = !!accessToken;
-      $('pickFolder').disabled = !(loggedIn && pickerReady);
-      $('pickFace').disabled = !(loggedIn && pickerReady);
+      for (const id of ['pickFolder', 'pickFolderAlt', 'pickFace', 'pickFaceAlt']) {
+        $(id).disabled = !(loggedIn && pickerReady);
+      }
       $('run').disabled = !(loggedIn && saved.folderId && saved.faceId);
       $('folderPicked').textContent = saved.folderId ? '選択済み：' + saved.folderName : '未選択';
       $('facePicked').textContent = saved.faceId ? '選択済み：' + saved.faceName : '未選択';
@@ -136,6 +149,7 @@
           }
           $('login').textContent = 'ログインし直す';
           $('login').disabled = false;
+          await adoptLinkedItems();
           refresh();
         },
         error_callback: (err) => {
@@ -155,7 +169,39 @@
       tokenClient.requestAccessToken();
     });
 
-    function openPicker(views, title, onPicked) {
+    /**
+     * 別の端末（PC など）ですでに選んでいれば、このアプリには許可が付いているので、
+     * 参加リンクのフォルダと顔データを、選び直さずにそのまま使う。
+     */
+    async function adoptLinkedItems() {
+      if (!HINT_FOLDER || !HINT_FACE) return;
+      const results = [];
+      for (const [key, id] of [['folder', HINT_FOLDER], ['face', HINT_FACE]]) {
+        try {
+          const f = await drive('/files/' + id, { fields: 'id,name,mimeType' });
+          if (key === 'folder' && f.mimeType === FOLDER_MIME && !saved.folderId) {
+            saved.folderId = f.id;
+            saved.folderName = f.name;
+            results.push('フォルダ');
+          }
+          if (key === 'face' && f.name === 'face-data.json' && !saved.faceId) {
+            saved.faceId = f.id;
+            saved.faceName = f.name;
+            results.push('顔データ');
+          }
+        } catch (_) {
+          // まだ選んでいない（このアプリに許可が無い）
+        }
+      }
+      if (results.length > 0) {
+        save();
+        $('pickerLog').textContent =
+          `${results.join('と')}は、すでに使える状態でした（前に別の端末で選んだため）。選び直しは不要です`;
+      }
+    }
+
+    function openPicker(view, title, onPicked) {
+      $('pickerLog').textContent = '選択画面を開いています…';
       const builder = new google.picker.PickerBuilder()
         .setAppId(APP_ID)
         .setOAuthToken(accessToken)
@@ -163,57 +209,90 @@
         .setOrigin(window.location.protocol + '//' + window.location.host)
         .setLocale('ja')
         .setTitle(title)
+        // タブを出さない（同じ名前のタブが並ぶと分かりにくいため、1回に1つの表示にする）
+        .enableFeature(google.picker.Feature.NAV_HIDDEN)
+        .addView(view)
         .setCallback((data) => {
-          if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
+          const action = data[google.picker.Response.ACTION];
+          if (action !== google.picker.Action.PICKED) {
+            // 開いた（loaded）、キャンセルなど。うまくいかないときの手がかりとして表示する
+            $('pickerLog').textContent = '選択画面：' + action;
+            return;
+          }
+          $('pickerLog').textContent = '選択画面：選びました';
           const doc = data[google.picker.Response.DOCUMENTS][0];
           onPicked(doc[google.picker.Document.ID], doc[google.picker.Document.NAME],
             doc[google.picker.Document.MIME_TYPE]);
         });
-      for (const v of views) builder.addView(v);
       builder.build().setVisible(true);
     }
 
+    function onFolderPicked(id, name, mime) {
+      if (mime !== FOLDER_MIME) {
+        $('folderPicked').textContent = 'フォルダではありません。もう一度「勝手にシェア」フォルダを選んでください';
+        return;
+      }
+      saved.folderId = id;
+      saved.folderName = name;
+      save();
+      refresh();
+    }
+
+    function onFacePicked(id, name) {
+      if (name !== 'face-data.json') {
+        $('facePicked').textContent = '「face-data.json」ではありません。もう一度選んでください';
+        return;
+      }
+      saved.faceId = id;
+      saved.faceName = name;
+      save();
+      refresh();
+    }
+
+    // ① 通常：参加リンクのフォルダだけを表示（参加リンクが無いときは名前で探す）
     $('pickFolder').addEventListener('click', () => {
-      const views = [];
-      if (HINT_FOLDER) {
-        views.push(new google.picker.DocsView(google.picker.ViewId.DOCS)
+      const view = HINT_FOLDER
+        ? new google.picker.DocsView(google.picker.ViewId.DOCS)
           .setFileIds(HINT_FOLDER)
           .setIncludeFolders(true)
-          .setSelectFolderEnabled(true));
-      }
-      views.push(new google.picker.DocsView(google.picker.ViewId.DOCS)
-        .setIncludeFolders(true)
-        .setSelectFolderEnabled(true)
-        .setMimeTypes(FOLDER_MIME)
-        .setQuery('勝手にシェア'));
-      openPicker(views, '「勝手にシェア」フォルダを選んでください', (id, name, mime) => {
-        if (mime !== FOLDER_MIME) {
-          $('folderPicked').textContent = 'フォルダではありません。もう一度「勝手にシェア」フォルダを選んでください';
-          return;
-        }
-        saved.folderId = id;
-        saved.folderName = name;
-        save();
-        refresh();
-      });
+          .setSelectFolderEnabled(true)
+          .setMode(google.picker.DocsViewMode.LIST)
+        : new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setSelectFolderEnabled(true)
+          .setMimeTypes(FOLDER_MIME)
+          .setQuery('勝手にシェア')
+          .setMode(google.picker.DocsViewMode.LIST);
+      openPicker(view, '「勝手にシェア」フォルダを選んでください', onFolderPicked);
     });
 
+    // ① 予備：共有されたフォルダを一覧で表示
+    $('pickFolderAlt').addEventListener('click', () => {
+      const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+        .setOwnedByMe(false)
+        .setMimeTypes(FOLDER_MIME)
+        .setSelectFolderEnabled(true)
+        .setMode(google.picker.DocsViewMode.LIST);
+      openPicker(view, '「勝手にシェア」フォルダを選んでください', onFolderPicked);
+    });
+
+    // ② 通常：参加リンクの顔データだけを表示（参加リンクが無いときは名前で探す）
     $('pickFace').addEventListener('click', () => {
-      const views = [];
-      if (HINT_FACE) {
-        views.push(new google.picker.DocsView(google.picker.ViewId.DOCS).setFileIds(HINT_FACE));
-      }
-      views.push(new google.picker.DocsView(google.picker.ViewId.DOCS).setQuery('face-data.json'));
-      openPicker(views, '「face-data.json」を選んでください', (id, name) => {
-        if (name !== 'face-data.json') {
-          $('facePicked').textContent = '「face-data.json」ではありません。もう一度選んでください';
-          return;
-        }
-        saved.faceId = id;
-        saved.faceName = name;
-        save();
-        refresh();
-      });
+      const view = HINT_FACE
+        ? new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setFileIds(HINT_FACE)
+          .setMode(google.picker.DocsViewMode.LIST)
+        : new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setQuery('face-data.json')
+          .setMode(google.picker.DocsViewMode.LIST);
+      openPicker(view, '「face-data.json」を選んでください', onFacePicked);
+    });
+
+    // ② 予備：名前で探す
+    $('pickFaceAlt').addEventListener('click', () => {
+      const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+        .setQuery('face-data.json')
+        .setMode(google.picker.DocsViewMode.LIST);
+      openPicker(view, '「face-data.json」を選んでください', onFacePicked);
     });
 
     async function drive(path, params = {}, init = {}) {
