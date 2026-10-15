@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#ffb977">
   <title>勝手にシェア</title>
   <link rel="stylesheet" href="../style.css">
-  <link rel="stylesheet" href="app.css?v=w8">
+  <link rel="stylesheet" href="app.css?v=w9">
 </head>
 <body>
   <main>
@@ -49,9 +49,12 @@
         <p class="muted" id="who"></p>
         <p id="faceInfo"></p>
         <p id="lastInfo" class="muted"></p>
-        <input type="file" id="shareFiles" accept="image/*,video/*" multiple hidden>
-        <button id="share">写真・動画を共有する</button>
-        <p class="muted">最近の写真を、多めに選んで大丈夫です（共有済みの写真は自動で飛ばします）。</p>
+        <!-- 受け取る形式をはっきり書くと、iPhone は形式を変換せずに元のファイルを渡すため、速く・軽くなる -->
+        <input type="file" id="shareFiles" accept="image/heic,image/heif,image/jpeg,image/png" multiple hidden>
+        <input type="file" id="shareVideos" accept="video/quicktime,video/mp4" multiple hidden>
+        <button id="share">写真を共有する</button>
+        <button id="shareVideo">動画を共有する</button>
+        <p class="muted">共有済みのものは自動で飛ばすので、多めに選んで大丈夫です。1回の目安は、写真は50枚、動画は5本くらいまでです。</p>
         <button class="secondary" id="openFolder">共有フォルダを開く（みんなの写真）</button>
         <button class="secondary" id="openTest">判定の試験（アップロードしない）</button>
       </div>
@@ -71,7 +74,7 @@
       <div class="card" id="testCard" hidden>
         <h2>判定の試験</h2>
         <p class="muted">写真を選ぶと、iPhone の中で顔を判定して分けます。アップロードはしません。初回だけ判定の部品（約40MB）を読み込むので、Wi-Fi のときに試してください。</p>
-        <input type="file" id="testFiles" accept="image/*" multiple hidden>
+        <input type="file" id="testFiles" accept="image/heic,image/heif,image/jpeg,image/png" multiple hidden>
         <button id="pickTest">写真を選んで判定する</button>
         <p class="muted" id="testStatus"></p>
         <div id="testResult" hidden>
@@ -106,7 +109,7 @@
     <p class="muted" id="message"></p>
   </main>
 
-  <script src="app.js?v=w8"></script>
+  <script src="app.js?v=w9"></script>
   <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()"></script>
   <script src="https://apis.google.com/js/api.js" async defer onload="gapiLoaded()"></script>
 </body>

@@ -99,7 +99,18 @@ export async function loadFaceModels(onStatus = () => {}) {
 
 /** 写真ファイルを読み込み、長い辺を MAX_SIDE 以下にしたキャンバスを返す（回転情報も反映）。 */
 async function decode(file) {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  // 最初から小さく読み込む（元の大きさのまま読むとメモリを多く使い、iPhone でページが落ちやすい）。
+  // 縦長の写真でも長い辺が大きくなりすぎないよう、幅を MAX_SIDE の 3/4 にする。対応していない端末では無視される
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, {
+      imageOrientation: 'from-image',
+      resizeWidth: Math.round(MAX_SIDE * 0.75),
+      resizeQuality: 'high',
+    });
+  } catch (_) {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  }
   const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(bitmap.width * scale);
@@ -405,7 +416,7 @@ function waitFor(el, event, timeoutMs) {
 }
 
 /**
- * 動画を判定する。動画全体から均等に最大30枚（2秒に1枚まで）の画像を取り出して判定し、
+ * 動画を判定する。動画全体から均等に最大15枚（2秒に1枚まで）の画像を取り出して判定し、
  * はっきり写っている場面が見つかれば、そこで終える（Android と同じ）。
  * 返り値：{ score, duration, width, height, tooLong, thumbnail, framesChecked, framesWithFace }
  */
@@ -414,7 +425,8 @@ export async function judgeVideo(file, registered, uploadThreshold, { stopEarly 
   try {
     const duration = video.duration;
     const tooLong = duration > MAX_AUTO_VIDEO_SEC;
-    const count = Math.max(1, Math.min(30, Math.ceil(duration / 2)));
+    // 軽くするため、動画1本あたり最大15枚（Android は30枚）
+    const count = Math.max(1, Math.min(15, Math.ceil(duration / 2)));
     const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(video.videoWidth * scale);

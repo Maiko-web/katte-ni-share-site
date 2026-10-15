@@ -429,8 +429,10 @@ function showLastInfo() {
  */
 async function photoKey(file, exif) {
   if (exif) return `exif:${exif.date}.${exif.subsec}:${exif.width}x${exif.height}`;
-  const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-  return 'sha:' + Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  // HEIC などは、元のファイルがそのまま渡されるので、先頭 1MB の指紋と大きさで見分ける（全体を読むより軽い）
+  const head = await file.slice(0, 1024 * 1024).arrayBuffer();
+  const hash = await crypto.subtle.digest('SHA-256', head);
+  return `sha1m:${file.size}:` + Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function isVideoFile(file) {
@@ -545,7 +547,10 @@ async function uploadResumable(file, type, meta) {
   throw new Error('アップロードが完了しませんでした');
 }
 
-$('share').addEventListener('click', () => {
+$('share').addEventListener('click', () => startPick('shareFiles'));
+$('shareVideo').addEventListener('click', () => startPick('shareVideos'));
+
+function startPick(inputId) {
   if (share.running) return;
   if (Date.now() - (state.tokenAt || 0) > TOKEN_MAX_AGE) {
     // 写真を選ぶ画面はボタンを押したときにしか開けないため、延長のあとでもう一度押してもらう
@@ -563,8 +568,8 @@ $('share').addEventListener('click', () => {
   $('shareNote').textContent =
     '選んだあと、iPhone が写真・動画を準備するまで少し時間がかかります（動画が多いと1分以上）。' +
     'この表示が「処理しています」に変わるまで、そのままお待ちください。';
-  $('shareFiles').click();
-});
+  $(inputId).click();
+}
 
 // 写真を選ぶ画面から戻ってきたら「準備中」と表示する（選ばずに閉じた場合は元に戻す）
 window.addEventListener('focus', () => {
@@ -579,7 +584,10 @@ window.addEventListener('focus', () => {
   }
 });
 
-$('shareFiles').addEventListener('change', async (e) => {
+$('shareFiles').addEventListener('change', onFilesChosen);
+$('shareVideos').addEventListener('change', onFilesChosen);
+
+async function onFilesChosen(e) {
   const files = Array.from(e.target.files || []);
   e.target.value = '';
   if (files.length === 0) return;
@@ -590,6 +598,7 @@ $('shareFiles').addEventListener('change', async (e) => {
   }
   share.running = true;
   $('share').disabled = true;
+  $('shareVideo').disabled = true;
   $('shareCard').hidden = false;
   $('reviewBox').hidden = true;
   $('shareStatus').textContent = `${files.length}件を受け取りました。準備しています…`;
@@ -605,8 +614,8 @@ $('shareFiles').addEventListener('change', async (e) => {
   try {
     $('shareStatus').textContent = '前回までの記録を読み込んでいます…';
     await loadRecords();
-    const face = await import('./face.js?v=w8');
-    const exifMod = await import('./exif.js?v=w8');
+    const face = await import('./face.js?v=w9');
+    const exifMod = await import('./exif.js?v=w9');
     await face.loadFaceModels((s) => { if (s) $('shareStatus').textContent = s; });
 
     $('shareProgress').max = files.length;
@@ -693,8 +702,9 @@ $('shareFiles').addEventListener('change', async (e) => {
     if (wakeLock) wakeLock.release().catch(() => {});
     share.running = false;
     $('share').disabled = false;
+    $('shareVideo').disabled = false;
   }
-});
+}
 
 function showReviews(reviews) {
   $('reviewList').innerHTML = '';
@@ -792,7 +802,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js?v=w8');
+    const face = await import('./face.js?v=w9');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
