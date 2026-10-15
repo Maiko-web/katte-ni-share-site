@@ -330,19 +330,59 @@ function makeThumbnail(canvas) {
 }
 
 /** 動画の長さと大きさだけを読む（同じ動画を見分けるため）。 */
-export async function videoInfo(file) {
+/**
+ * 動画を開く。iPhone の Safari は、画面に置いていない動画や、一度も再生していない動画は
+ * 中身を読み込まないため、見えない小さな形で画面に置き、音を消して一瞬だけ再生して止める。
+ */
+async function openVideo(file) {
   const url = URL.createObjectURL(file);
   const video = document.createElement('video');
   video.muted = true;
-  video.preload = 'metadata';
+  video.defaultMuted = true;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('muted', '');
+  video.preload = 'auto';
+  video.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none;';
+  document.body.append(video);
   video.src = url;
-  try {
-    await waitFor(video, 'loadedmetadata', 20000);
-    return { duration: video.duration, width: video.videoWidth, height: video.videoHeight };
-  } finally {
+  const close = () => {
+    video.pause();
     video.removeAttribute('src');
     video.load();
+    video.remove();
     URL.revokeObjectURL(url);
+  };
+  try {
+    await waitFor(video, 'loadedmetadata', 30000);
+    try {
+      await video.play();
+      video.pause();
+    } catch (_) {
+      // 再生できなくても、読み込みが進むことがあるので続ける
+    }
+    return { video, close };
+  } catch (err) {
+    close();
+    throw err;
+  }
+}
+
+/** 指定の時刻に移動して、画像を描ける状態になるまで待つ。 */
+async function seekTo(video, time) {
+  const seeked = waitFor(video, 'seeked', 20000);
+  video.currentTime = time;
+  await seeked;
+  if (video.readyState < 2) await waitFor(video, 'canplay', 10000);
+}
+
+/** 動画の長さと大きさだけを読む（同じ動画を見分けるため）。 */
+export async function videoInfo(file) {
+  const { video, close } = await openVideo(file);
+  try {
+    return { duration: video.duration, width: video.videoWidth, height: video.videoHeight };
+  } finally {
+    close();
   }
 }
 
@@ -370,14 +410,8 @@ function waitFor(el, event, timeoutMs) {
  * 返り値：{ score, duration, width, height, tooLong, thumbnail, framesChecked, framesWithFace }
  */
 export async function judgeVideo(file, registered, uploadThreshold, { stopEarly = true } = {}) {
-  const url = URL.createObjectURL(file);
-  const video = document.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = 'auto';
-  video.src = url;
+  const { video, close } = await openVideo(file);
   try {
-    await waitFor(video, 'loadeddata', 30000);
     const duration = video.duration;
     const tooLong = duration > MAX_AUTO_VIDEO_SEC;
     const count = Math.max(1, Math.min(30, Math.ceil(duration / 2)));
@@ -392,8 +426,7 @@ export async function judgeVideo(file, registered, uploadThreshold, { stopEarly 
     let withFace = 0;
     let thumbnail = '';
     for (let i = 0; i < count; i++) {
-      video.currentTime = Math.min(duration * (i + 0.5) / count, Math.max(duration - 0.05, 0));
-      await waitFor(video, 'seeked', 15000);
+      await seekTo(video, Math.min(duration * (i + 0.5) / count, Math.max(duration - 0.05, 0)));
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       if (!thumbnail) thumbnail = makeThumbnail(canvas);
       const r = await judgeCanvas(canvas, registered);
@@ -410,8 +443,6 @@ export async function judgeVideo(file, registered, uploadThreshold, { stopEarly 
     canvas.height = 0;
     return result;
   } finally {
-    video.removeAttribute('src');
-    video.load();
-    URL.revokeObjectURL(url);
+    close();
   }
 }
