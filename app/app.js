@@ -554,7 +554,29 @@ $('share').addEventListener('click', () => {
     tokenClient.requestAccessToken({ prompt: '' });
     return;
   }
+  // 選んだあと、iPhone が写真・動画をページに渡すまで（動画は形式の変換も）時間がかかり、
+  // その間は何も届かないため、先に「準備中」と表示しておく
+  $('shareCard').hidden = false;
+  $('reviewBox').hidden = true;
+  $('shareProgress').removeAttribute('value');
+  $('shareStatus').textContent = '写真・動画を選んで「追加」を押してください。';
+  $('shareNote').textContent =
+    '選んだあと、iPhone が写真・動画を準備するまで少し時間がかかります（動画が多いと1分以上）。' +
+    'この表示が「処理しています」に変わるまで、そのままお待ちください。';
   $('shareFiles').click();
+});
+
+// 写真を選ぶ画面から戻ってきたら「準備中」と表示する（選ばずに閉じた場合は元に戻す）
+window.addEventListener('focus', () => {
+  if (share.running || $('shareCard').hidden) return;
+  if ($('shareStatus').textContent.startsWith('写真・動画を選んで')) {
+    $('shareStatus').textContent = 'iPhone が写真・動画を準備しています…';
+    setTimeout(() => {
+      if (!share.running && $('shareStatus').textContent.startsWith('iPhone が写真・動画を準備')) {
+        $('shareStatus').textContent = 'iPhone が写真・動画を準備しています…（選ばずに閉じた場合は、もう一度ボタンを押してください）';
+      }
+    }, 15000);
+  }
 });
 
 $('shareFiles').addEventListener('change', async (e) => {
@@ -570,6 +592,8 @@ $('shareFiles').addEventListener('change', async (e) => {
   $('share').disabled = true;
   $('shareCard').hidden = false;
   $('reviewBox').hidden = true;
+  $('shareStatus').textContent = `${files.length}件を受け取りました。準備しています…`;
+  $('shareNote').textContent = '処理が終わるまで、画面を開いたままにしてください（触らなくて大丈夫です）。';
   $('reviewList').innerHTML = '';
   $('shareCard').scrollIntoView({ behavior: 'smooth' });
   let wakeLock = null;
@@ -581,8 +605,8 @@ $('shareFiles').addEventListener('change', async (e) => {
   try {
     $('shareStatus').textContent = '前回までの記録を読み込んでいます…';
     await loadRecords();
-    const face = await import('./face.js?v=w7');
-    const exifMod = await import('./exif.js?v=w7');
+    const face = await import('./face.js?v=w8');
+    const exifMod = await import('./exif.js?v=w8');
     await face.loadFaceModels((s) => { if (s) $('shareStatus').textContent = s; });
 
     $('shareProgress').max = files.length;
@@ -768,7 +792,7 @@ $('testFiles').addEventListener('change', async (e) => {
   $('pickTest').disabled = true;
   test.results = [];
   try {
-    const face = await import('./face.js?v=w7');
+    const face = await import('./face.js?v=w8');
     await face.loadFaceModels((s) => { $('testStatus').textContent = s; });
     const started = performance.now();
     for (let i = 0; i < files.length; i++) {
